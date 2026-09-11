@@ -1,0 +1,17 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\fried\Profitmind\DiskUsageVisualizer\build\CMakeFiles\2d55f0bfbe6b3d98863a92a50c0bcb89\NightlyMemoryCheck.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\fried\Profitmind\DiskUsageVisualizer\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\Users\fried\Profitmind\DiskUsageVisualizer\build\CMakeFiles\NightlyMemoryCheck" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{BA170948-2A7C-384F-A6F2-250625D94FAB}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
