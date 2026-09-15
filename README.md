@@ -1,2 +1,2 @@
-# DiskUsageVisualizer
-Recursively scans a directory, sums up sizes of everything inside, and prints a sorted, visual breakdown of what's taking up space.
+# TerminalPhysicsEngine
+A fixed-size terminal "canvas" where particles fall, bounce, and collide under real physics (not scripted animation) — rendered frame by frame in real time.
