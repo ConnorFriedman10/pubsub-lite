@@ -5,7 +5,6 @@
 #include <ws2tcpip.h>
 #include <functional>
 #include "node.h"
-using namespace std;
 
 void Node::publish(std::string topic, std::string message) { //used to be client.cpp
     do {
@@ -49,7 +48,7 @@ void Node::subscribe(std::string topic, std::function<void(const std::string&)> 
         serverAddr.sin_family      = AF_INET;
         serverAddr.sin_port        = htons(PORT);
         serverAddr.sin_addr.s_addr = INADDR_ANY;
-        if (bind(listenSock_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
+        if (::bind(listenSock_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
             { std::cerr << "bind() failed: " << WSAGetLastError() << "\n"; break; }
 
         // Step 4: Start listening (queue up to 1 pending connection)
@@ -90,7 +89,7 @@ void Node::spin() {
         serverAddr.sin_family      = AF_INET;
         serverAddr.sin_port        = htons(PORT);
         serverAddr.sin_addr.s_addr = INADDR_ANY;
-        if (bind(listenSock_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
+        if (::bind(listenSock_, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
             { std::cerr << "bind() failed: " << WSAGetLastError() << "\n"; break; }
 
         // Step 4: Start listening (queue up to 1 pending connection)
