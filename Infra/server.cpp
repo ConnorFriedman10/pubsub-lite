@@ -1,7 +1,7 @@
 #include <iostream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib") //address lack of cmake
+#include "Node/node.h"#pragma comment(lib, "ws2_32.lib") //address lack of cmake
 
 const int PORT = 9999;
 const int BUFFER_SIZE = 512;
