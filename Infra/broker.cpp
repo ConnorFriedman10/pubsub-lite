@@ -63,11 +63,20 @@ int main() {
             int bytesReceived = recv(client, buffer, BUFFER_SIZE - 1, 0);
 
             if (bytesReceived <= 0) {
-                // Node disconnected — mark for removal
+                // Node disconnected — remove from clients and registry
                 std::cout << "A node disconnected.\n";
                 FD_CLR(client, &master);
-                closesocket(client);
+                SOCKET dead = client;   // save value before marking invalid
+                closesocket(dead);
                 client = INVALID_SOCKET;
+
+                // Proactively purge from every topic so we never try to send to it
+                for (auto& [topic, sockets] : registry) {
+                    sockets.erase(
+                        std::remove(sockets.begin(), sockets.end(), dead),
+                        sockets.end()
+                    );
+                }
             } else {
                 // Parse the topic out of the buffer
                 uint8_t topicLen = buffer[1];
