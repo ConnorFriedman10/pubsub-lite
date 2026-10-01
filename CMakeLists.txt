@@ -19,3 +19,6 @@ target_link_libraries(server ws2_32)
 
 add_executable(client implementation_files/client.cpp)
 target_link_libraries(client ws2_32)
+
+add_executable(broker Infra/broker.cpp)
+target_link_libraries(broker ws2_32)
