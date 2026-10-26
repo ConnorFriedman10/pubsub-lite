@@ -8,14 +8,12 @@
 #pragma comment(lib, "ws2_32.lib")
 
 const int PORT        = 9999;
-const int BUFFER_SIZE = 512;
+const int BUFFER_SIZE = 4096;
 
 int main() {
-    // Part 1: Start Winsock
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-    // Part 3: Broker setup: create socket, bind, listen
     SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     sockaddr_in serverAddr{};
@@ -27,23 +25,23 @@ int main() {
 
     std::cout << "Broker listening on port " << PORT << "...\n";
 
-    // Part 4: select() loop — watch many sockets at once
-    fd_set master;                                              // the permanent set of all sockets to watch
+    fd_set master;
     FD_ZERO(&master);
     FD_SET(listenSock, &master);
 
-    std::vector<SOCKET> clients;                               // all currently connected node sockets
-    std::unordered_map<std::string, std::vector<SOCKET>> registry; // topic -> list of subscriber sockets
+    std::vector<SOCKET> clients;
+    std::unordered_map<std::string, std::vector<SOCKET>> registry;
+    // Per-socket accumulation buffer: handles messages split across recv() calls.
+    std::unordered_map<SOCKET, std::vector<char>> rxbufs;
 
     while (true) {
-        fd_set readSet = master;    // copy — select() modifies the set it receives
+        fd_set readSet = master;
 
         if (select(0, &readSet, NULL, NULL, NULL) == SOCKET_ERROR) {
             std::cerr << "select() failed: " << WSAGetLastError() << "\n";
             break;
         }
 
-        // A new node is trying to connect
         if (FD_ISSET(listenSock, &readSet)) {
             sockaddr_in clientAddr{};
             int clientAddrLen = sizeof(clientAddr);
@@ -51,73 +49,85 @@ int main() {
             if (clientSock != INVALID_SOCKET) {
                 FD_SET(clientSock, &master);
                 clients.push_back(clientSock);
-                std::cout << "New node connected.\n";
+                rxbufs[clientSock] = {};
             }
         }
 
-        // Part 5: Check each connected node for incoming messages
         for (SOCKET& client : clients) {
             if (!FD_ISSET(client, &readSet)) continue;
 
-            char buffer[BUFFER_SIZE] = {};
-            int bytesReceived = recv(client, buffer, BUFFER_SIZE - 1, 0);
+            char chunk[BUFFER_SIZE];
+            int n = recv(client, chunk, BUFFER_SIZE, 0);
 
-            if (bytesReceived <= 0) {
-                // Node disconnected — remove from clients and registry
-                std::cout << "A node disconnected.\n";
+            if (n <= 0) {
                 FD_CLR(client, &master);
-                SOCKET dead = client;   // save value before marking invalid
+                SOCKET dead = client;
                 closesocket(dead);
                 client = INVALID_SOCKET;
+                rxbufs.erase(dead);
 
-                // Proactively purge from every topic so we never try to send to it
-                for (auto& [topic, sockets] : registry) {
-                    sockets.erase(
-                        std::remove(sockets.begin(), sockets.end(), dead),
-                        sockets.end()
-                    );
-                }
+                for (auto& [topic, sockets] : registry)
+                    sockets.erase(std::remove(sockets.begin(), sockets.end(), dead), sockets.end());
+
             } else {
-                // Parse the topic out of the buffer
-                uint8_t topicLen = buffer[1];
-                std::string topic(buffer + 2, topicLen);
+                auto& rxbuf = rxbufs[client];
+                rxbuf.insert(rxbuf.end(), chunk, chunk + n);
 
-                if (buffer[0] == MSG_SUBSCRIBE) {
-                    // Register this socket as a subscriber for the topic
-                    registry[topic].push_back(client);
-                    std::cout << "Node subscribed to \"" << topic << "\".\n";
+                size_t offset = 0;
+                while (offset < rxbuf.size()) {
+                    // Need at least 2 bytes for the type + topicLen header.
+                    if (offset + 2 > rxbuf.size()) break;
 
-                } else if (buffer[0] == MSG_PUBLISH) {
-                    // Extract the payload sitting after the topic
-                    uint8_t payloadLen = buffer[2 + topicLen];
-                    const char* payload = buffer + 2 + topicLen + 1;
+                    uint8_t msgType  = (uint8_t)rxbuf[offset];
+                    uint8_t topicLen = (uint8_t)rxbuf[offset + 1];
 
-                    std::cout << "Routing \"" << topic << "\" to "
-                              << registry[topic].size() << " subscriber(s).\n";
+                    // Wait for the full topic to arrive.
+                    if (offset + 2 + topicLen > rxbuf.size()) break;
 
-                    // Forward to every subscriber on this topic
-                    for (SOCKET& sub : registry[topic]) {
-                        if (send(sub, payload, payloadLen, 0) == SOCKET_ERROR) {
-                            // Subscriber is gone — mark for removal from registry
-                            closesocket(sub);
-                            sub = INVALID_SOCKET;
+                    std::string topic(rxbuf.data() + offset + 2, topicLen);
+
+                    if (msgType == MSG_SUBSCRIBE) {
+                        registry[topic].push_back(client);
+                        std::cout << "Node subscribed to \"" << topic << "\".\n";
+                        offset += 2 + topicLen;
+
+                    } else if (msgType == MSG_PUBLISH) {
+                        // Wait for payloadLen byte and full payload.
+                        if (offset + 2 + topicLen + 1 > rxbuf.size()) break;
+                        uint8_t payloadLen = (uint8_t)rxbuf[offset + 2 + topicLen];
+                        if (offset + 2 + topicLen + 1 + payloadLen > rxbuf.size()) break;
+
+                        const char* payload = rxbuf.data() + offset + 2 + topicLen + 1;
+
+                        char delivery[258];  // 1-byte type + 1-byte len + up to 255 bytes payload
+                        delivery[0] = MSG_DATA;
+                        delivery[1] = (char)payloadLen;
+                        memcpy(delivery + 2, payload, payloadLen);
+
+                        for (SOCKET& sub : registry[topic]) {
+                            if (send(sub, delivery, 2 + payloadLen, 0) == SOCKET_ERROR) {
+                                closesocket(sub);
+                                sub = INVALID_SOCKET;
+                            }
                         }
-                    }
+                        registry[topic].erase(
+                            std::remove(registry[topic].begin(), registry[topic].end(), (SOCKET)INVALID_SOCKET),
+                            registry[topic].end()
+                        );
+                        offset += 2 + topicLen + 1 + payloadLen;
 
-                    // Clean up any stale subscriber sockets
-                    registry[topic].erase(
-                        std::remove(registry[topic].begin(), registry[topic].end(), (SOCKET)INVALID_SOCKET),
-                        registry[topic].end()
-                    );
+                    } else {
+                        break;
+                    }
                 }
+
+                // Drop consumed bytes from the front of the buffer.
+                if (offset > 0)
+                    rxbuf.erase(rxbuf.begin(), rxbuf.begin() + offset);
             }
         }
 
-        // Remove disconnected clients from the client list
-        clients.erase(
-            std::remove(clients.begin(), clients.end(), (SOCKET)INVALID_SOCKET),
-            clients.end()
-        );
+        clients.erase(std::remove(clients.begin(), clients.end(), (SOCKET)INVALID_SOCKET), clients.end());
     }
 
     closesocket(listenSock);

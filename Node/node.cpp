@@ -1,50 +1,55 @@
 #include <iostream>
 #include <cstring>
+#include <vector>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <functional>
 #include "node.h"
 
-Node::Node(std::string name) : name_(name), sock_(INVALID_SOCKET) {}
+Node::Node(std::string name) : name_(name), sock_(INVALID_SOCKET), pubSock_(INVALID_SOCKET) {}
+
+Node::~Node() {
+    if (sock_    != INVALID_SOCKET) closesocket(sock_);
+    if (pubSock_ != INVALID_SOCKET) closesocket(pubSock_);
+}
 
 void Node::publish(std::string topic, std::string message) {
-    // Use a local socket so we never overwrite sock_, which subscribe() keeps open
-    SOCKET pubSock = INVALID_SOCKET;
-
-    do {
-        pubSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (pubSock == INVALID_SOCKET)
-            { std::cerr << "socket() failed: " << WSAGetLastError() << "\n"; break; }
+    // Lazily connect once and reuse the socket for all subsequent publishes.
+    if (pubSock_ == INVALID_SOCKET) {
+        pubSock_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (pubSock_ == INVALID_SOCKET)
+            { std::cerr << "socket() failed: " << WSAGetLastError() << "\n"; return; }
 
         sockaddr_in brokerAddr{};
         brokerAddr.sin_family = AF_INET;
         brokerAddr.sin_port   = htons(PORT);
         inet_pton(AF_INET, SERVER_IP, &brokerAddr.sin_addr);
 
-        if (connect(pubSock, (sockaddr*)&brokerAddr, sizeof(brokerAddr)) == SOCKET_ERROR)
-            { std::cerr << "connect() failed: " << WSAGetLastError() << "  Is broker running?\n"; break; }
+        if (connect(pubSock_, (sockaddr*)&brokerAddr, sizeof(brokerAddr)) == SOCKET_ERROR) {
+            std::cerr << "connect() failed: " << WSAGetLastError() << "  Is broker running?\n";
+            closesocket(pubSock_);
+            pubSock_ = INVALID_SOCKET;
+            return;
+        }
+    }
 
-        // Build the wire format: [MSG_PUBLISH][topicLen][topic][payloadLen][payload]
-        char buffer[BUFFER_SIZE] = {};
-        uint8_t topicLen   = (uint8_t)topic.size();
-        uint8_t payloadLen = (uint8_t)message.size();
+    // Build the wire format: [MSG_PUBLISH][topicLen][topic][payloadLen][payload]
+    char buffer[BUFFER_SIZE] = {};
+    uint8_t topicLen   = (uint8_t)topic.size();
+    uint8_t payloadLen = (uint8_t)message.size();
 
-        buffer[0] = MSG_PUBLISH;
-        buffer[1] = topicLen;
-        memcpy(buffer + 2, topic.c_str(), topicLen);
-        buffer[2 + topicLen] = payloadLen;
-        memcpy(buffer + 2 + topicLen + 1, message.c_str(), payloadLen);
+    buffer[0] = MSG_PUBLISH;
+    buffer[1] = topicLen;
+    memcpy(buffer + 2, topic.c_str(), topicLen);
+    buffer[2 + topicLen] = payloadLen;
+    memcpy(buffer + 2 + topicLen + 1, message.c_str(), payloadLen);
 
-        int totalLen = 2 + topicLen + 1 + payloadLen;
-        if (send(pubSock, buffer, totalLen, 0) == SOCKET_ERROR)
-            std::cerr << "send() failed: " << WSAGetLastError() << "\n";
-        else
-            std::cout << "Published \"" << message << "\" to topic \"" << topic << "\".\n";
-
-    } while (false);
-
-    // Publish is fire-and-forget — close after each message
-    if (pubSock != INVALID_SOCKET) closesocket(pubSock);
+    int totalLen = 2 + topicLen + 1 + payloadLen;
+    if (send(pubSock_, buffer, totalLen, 0) == SOCKET_ERROR) {
+        std::cerr << "send() failed: " << WSAGetLastError() << "\n";
+        closesocket(pubSock_);
+        pubSock_ = INVALID_SOCKET;
+    }
 }
 
 void Node::subscribe(std::string topic, std::function<void(const std::string&)> callback) {
@@ -92,17 +97,25 @@ void Node::spin() {
 
     std::cout << "Node \"" << name_ << "\" spinning...\n";
 
-    // spin() blocks the calling thread for its entire lifetime.
-    // If a node needs to both publish and subscribe, run spin() on a
-    // std::thread and call publish() from the main thread.
+    // Accumulation buffer handles the case where one recv() contains multiple
+    // framed messages or a message split across two recv() calls.
+    std::vector<char> rxbuf;
+
     while (true) {
-        char buffer[BUFFER_SIZE] = {};
-        int bytesReceived = recv(sock_, buffer, BUFFER_SIZE - 1, 0);
-        if (bytesReceived > 0)
-            callback_(std::string(buffer, bytesReceived));
-        else {
+        char chunk[BUFFER_SIZE] = {};
+        int n = recv(sock_, chunk, BUFFER_SIZE - 1, 0);
+        if (n <= 0) {
             std::cerr << "Broker disconnected or recv() failed.\n";
             break;
+        }
+        rxbuf.insert(rxbuf.end(), chunk, chunk + n);
+
+        // Drain all complete [MSG_DATA][payloadLen][payload] frames.
+        while (rxbuf.size() >= 2 && (uint8_t)rxbuf[0] == MSG_DATA) {
+            uint8_t payLen = (uint8_t)rxbuf[1];
+            if (rxbuf.size() < (size_t)(2 + payLen)) break;  // partial frame
+            callback_(std::string(rxbuf.data() + 2, payLen));
+            rxbuf.erase(rxbuf.begin(), rxbuf.begin() + 2 + payLen);
         }
     }
 
